@@ -1,0 +1,113 @@
+import asyncio
+import ccxt
+import talib
+import numpy as np
+import requests
+from flask import Flask
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def hello_world():
+    return 'Hello from Flask!'
+
+
+binance = ccxt.binance({
+    'apiKey': '123445',
+    'secret': '12334',
+    'enableRateLimit': True,
+})
+
+async def get_ema(pair, period):
+    # Fetch OHLCV data
+    ohlcv = await binance.fetch_ohlcv(pair, '30m', limit=period)
+
+    # Convert data to numpy array
+    np_ohlcv = np.array(ohlcv)
+
+    # Extract closing prices
+    closes = np_ohlcv[:, 4]
+
+    # Calculate EMA
+    ema = talib.EMA(closes, timeperiod=period)
+
+    return ema
+
+async def get_golden_cross_pairs():
+    # Fetch all available symbols
+    markets = await binance.load_markets()
+    symbols = list(markets.keys())
+
+    # Filter only futures symbols
+    futures_symbols = [s for s in symbols if 'FUTURES' in s]
+
+    golden_cross_pairs = []
+
+    # Iterate through all futures symbols
+    for symbol in futures_symbols:
+        try:
+            # Calculate EMAs
+            ema30 = await get_ema(symbol, 30)
+            ema180 = await get_ema(symbol, 180)
+
+            # Check for golden cross
+            if ema30[-1] > ema180[-1] and ema30[-2] < ema180[-2]:
+                golden_cross_pairs.append(symbol)
+        except:
+            pass
+
+    return golden_cross_pairs
+
+async def send_telegram_message(message):
+    # Replace YOUR_TELEGRAM_BOT_TOKEN and YOUR_TELEGRAM_CHAT_ID with your own values
+    url = f"https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendMessage?chat_id=YOUR_TELEGRAM_CHAT_ID&text={message}"
+    response = requests.get(url)
+
+@app.route('/main')
+async def main():
+    # Get golden cross pairs
+    golden_cross_pairs = await get_golden_cross_pairs()
+
+    # Iterate through all golden cross pairs
+    for symbol in golden_cross_pairs:
+        try:
+            # Fetch ticker data
+            ticker = await binance.fetch_ticker(symbol)
+
+            # Fetch 30 minute candle data
+            ohlcv = await binance.fetch_ohlcv(symbol, '30m', limit=2)
+            np_ohlcv = np.array(ohlcv)
+
+            # Extract volume and unit price
+            volume = np_ohlcv[-1][5]
+            unit_price = ticker['last']
+
+            # Check if volume increased
+            if volume > np_ohlcv[-2][5]:
+                # Fetch 24 hour volume rank
+                volume_rank = await binance.fetch_status()
+                volume_rank = volume_rank['binance']['futures']['volumeRank'][symbol]
+
+                # Calculate volume and difference
+                volume_usd = volume * unit_price
+                diff_usd = (volume - np_ohlcv[-2][5]) * unit_price
+
+                # Create message
+                message = f"Symbol: {symbol}\nVolume rank: {volume_rank}\nVolume: {volume_usd:.2f} USD\nDifference: {diff_usd:.2f} USD"
+
+                # Send message
+                await send_telegram_message(message)
+
+        except Exception as e:
+            print(f"Error occurred: {e}")
+            pass
+
+    return 'OK'
+
+
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    app.run()
